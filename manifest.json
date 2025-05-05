@@ -1,0 +1,17 @@
+{
+    "domain": "metra_arrivals",
+    "name": "Metra Arrivals",
+    "version": "1.0.0",
+    "config_flow": true,
+    "documentation": "https://github.com/your-repo",
+    "issue_tracker": "https://github.com/your-repo/issues",
+    "requirements": [
+        "aiohttp>=3.8.0",
+        "pytz"
+    ],
+    "dependencies": [],
+    "codeowners": [
+        "@your_github"
+    ],
+    "iot_class": "cloud_polling"
+}
