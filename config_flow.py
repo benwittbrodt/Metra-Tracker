@@ -1,4 +1,4 @@
-"""Config flow for Metra Arrivals integration."""
+"""Config flow for Metra Tracker integration."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ async def validate_auth(username: str, password: str, hass: HomeAssistant) -> bo
 
 
 class MetraArrivalsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Metra Arrivals."""
+    """Handle a config flow for Metra Tracker."""
 
     VERSION = 1
     CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL

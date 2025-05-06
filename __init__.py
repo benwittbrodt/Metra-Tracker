@@ -1,4 +1,4 @@
-"""The Metra Arrivals integration."""
+"""The Metra Tracker integration."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ PLATFORMS = [Platform.SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Metra Arrivals from a config entry."""
+    """Set up Metra Tracker from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

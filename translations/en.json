@@ -1,0 +1,14 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Set up API access for Metra Tracker",
+                "description": "If you don't have API credentials yet visit: https://metra.com/developers",
+                "data": {
+                    "username": "Your Username",
+                    "password": "Your Password"
+                }
+            }
+        }
+    }
+}

@@ -1,17 +1,17 @@
 {
-    "domain": "metra_arrivals",
-    "name": "Metra Arrivals",
+    "domain": "metra_tracker",
+    "name": "Metra Tracker",
     "version": "1.0.0",
     "config_flow": true,
-    "documentation": "https://github.com/your-repo",
-    "issue_tracker": "https://github.com/your-repo/issues",
+    "documentation": "https://github.com/benwittbrodt/Metra-Tracker",
+    "issue_tracker": "https://github.com/benwittbrodt/Metra-Tracker/issues",
     "requirements": [
         "aiohttp>=3.8.0",
         "pytz"
     ],
     "dependencies": [],
     "codeowners": [
-        "@your_github"
+        "@benwittbrodt"
     ],
     "iot_class": "cloud_polling"
 }

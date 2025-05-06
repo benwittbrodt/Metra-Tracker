@@ -1,6 +1,6 @@
-"""Constants for Metra Arrivals integration."""
+"""Constants for Metra Tracker integration."""
 
-DOMAIN = "metra_arrivals"
+DOMAIN = "metra_tracker"
 DEFAULT_NAME = "Metra UP-W Arrivals"
 DEFAULT_SCAN_INTERVAL = 30  # 30 seconds
 CONF_USERNAME = "username"
