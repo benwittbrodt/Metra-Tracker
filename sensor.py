@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.util.dt import get_time_zone
+from homeassistant.util.dt import get_time_zone, now
 
 from .const import DOMAIN, CONF_USERNAME, CONF_PASSWORD, DEFAULT_SCAN_INTERVAL
 
@@ -29,7 +29,15 @@ async def async_setup_entry(
     """Set up the sensor platform."""
     coordinator = MetraArrivalsCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
-    async_add_entities([MetraArrivalsSensor(coordinator, entry)])
+
+    # Create three sensors (one for each of the next three trains)
+    async_add_entities(
+        [
+            MetraTrainSensor(coordinator, entry, 1),
+            MetraTrainSensor(coordinator, entry, 2),
+            MetraTrainSensor(coordinator, entry, 3),
+        ]
+    )
 
 
 class MetraArrivalsCoordinator(DataUpdateCoordinator):
@@ -67,6 +75,8 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("Received %s trips from API", len(data))
 
                 trains = []
+                current_time = now(self._tz)
+
                 for item in data:
                     try:
                         trip = item.get("trip_update", {})
@@ -106,6 +116,9 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
 
                         # Only add trains with both times
                         if oakpark_time and otc_time:
+                            # Calculate time difference from now (can be negative if train already left)
+                            time_diff = (oakpark_time - current_time).total_seconds()
+
                             trains.append(
                                 {
                                     "oakpark": oakpark_time.strftime("%H:%M"),
@@ -113,6 +126,8 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                                     "oakpark_full": oakpark_time.isoformat(),
                                     "otc_full": otc_time.isoformat(),
                                     "trip_id": trip_info.get("trip_id", "unknown"),
+                                    "time_diff": time_diff,  # Store time difference for sorting
+                                    "date": oakpark_time.date(),  # Store date for display
                                 }
                             )
 
@@ -120,14 +135,28 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                         _LOGGER.warning("Error processing trip: %s", ex, exc_info=True)
                         continue
 
-                # Sort by Oak Park departure time
-                trains.sort(key=lambda x: x["oakpark_full"])
-                _LOGGER.debug("Processed %d UP-W trains", len(trains))
+                # Sort by time difference (closest upcoming train first)
+                trains.sort(key=lambda x: x["time_diff"])
+
+                # Filter out trains that have already departed (more than 5 minutes ago)
+                upcoming_trains = [
+                    t for t in trains if t["time_diff"] > -300
+                ]  # 5 minutes buffer
+
+                # If no upcoming trains, show the next one (even if technically tomorrow)
+                if not upcoming_trains and trains:
+                    upcoming_trains = [trains[0]]
+
+                _LOGGER.debug(
+                    "Processed %d UP-W trains (%d upcoming)",
+                    len(trains),
+                    len(upcoming_trains),
+                )
 
                 return {
-                    "trains": trains[:3],  # Only keep next 3 trains
-                    "count": len(trains),
-                    "last_update": datetime.now().isoformat(),
+                    "trains": upcoming_trains[:3],  # Only keep next 3 trains
+                    "count": len(upcoming_trains),
+                    "last_update": current_time.isoformat(),
                 }
 
         except Exception as ex:
@@ -135,31 +164,60 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
             return {"error": str(ex)}
 
 
-class MetraArrivalsSensor(SensorEntity):
-    """Representation of a Metra Arrivals sensor."""
+class MetraTrainSensor(SensorEntity):
+    """Representation of a Metra Train arrival sensor."""
 
     _attr_icon = "mdi:train"
     _attr_has_entity_name = True
 
     def __init__(
-        self, coordinator: MetraArrivalsCoordinator, entry: ConfigEntry
+        self,
+        coordinator: MetraArrivalsCoordinator,
+        entry: ConfigEntry,
+        train_number: int,
     ) -> None:
         """Initialize the sensor."""
         self._coordinator = coordinator
-        self._attr_name = "Metra UP-W Arrivals"
-        self._attr_unique_id = f"metra_upw_arrivals_{entry.entry_id}"
+        self._train_number = train_number
+        self._attr_name = f"Metra UP-W Train {train_number}"
+        self._attr_unique_id = f"metra_upw_train_{train_number}_{entry.entry_id}"
 
     @property
     def state(self) -> str:
         """Return the state of the sensor."""
         if not self.available:
             return "Unavailable"
-        return f"{self._coordinator.data.get('count', 0)} upcoming trains"
+
+        trains = self._coordinator.data.get("trains", [])
+        if len(trains) >= self._train_number:
+            train = trains[self._train_number - 1]
+            # Add date if it's tomorrow
+            date_str = ""
+            if train.get("date") != datetime.now().date():
+                date_str = " (Tomorrow)"
+            return f"{train['oakpark']} → {train['otc']}{date_str}"
+        return "No data"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes."""
-        return self._coordinator.data or {}
+        if not self.available:
+            return {}
+
+        trains = self._coordinator.data.get("trains", [])
+        if len(trains) >= self._train_number:
+            train = trains[self._train_number - 1]
+            return {
+                "oakpark_time": train["oakpark"],
+                "otc_time": train["otc"],
+                "oakpark_full": train["oakpark_full"],
+                "otc_full": train["otc_full"],
+                "trip_id": train["trip_id"],
+                "train_number": self._train_number,
+                "last_update": self._coordinator.data.get("last_update"),
+                "is_tomorrow": train.get("date") != datetime.now().date(),
+            }
+        return {}
 
     @property
     def available(self) -> bool:
@@ -168,6 +226,7 @@ class MetraArrivalsSensor(SensorEntity):
             self._coordinator.last_update_success
             and isinstance(self._coordinator.data, dict)
             and "error" not in self._coordinator.data
+            and len(self._coordinator.data.get("trains", [])) >= self._train_number
         )
 
     async def async_added_to_hass(self) -> None:
