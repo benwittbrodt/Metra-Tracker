@@ -1,15 +1,3 @@
-"""Constants for Metra Tracker integration."""
-
-DOMAIN = "metra_tracker"
-DEFAULT_NAME = "Metra UP-W Arrivals"
-DEFAULT_SCAN_INTERVAL = 30  # 30 seconds
-CONF_USERNAME = "username"
-CONF_PASSWORD = "password"
-
-CONF_LINE = "line"
-CONF_START_STATION = "start_station"
-CONF_END_STATION = "end_station"
-
 METRA_LINES = {
     "BNSF": "BNSF",
     "HC": "Heritage Corridor",
@@ -23,7 +11,6 @@ METRA_LINES = {
     "UP-NW": "Union Pacific Northwest",
     "UP-W": "Union Pacific West",
 }
-
 METRA_STOPS_BY_LINE = {
     "BNSF": [
         "AURORA",
@@ -290,3 +277,10 @@ METRA_STOPS_BY_LINE = {
         "OTC",
     ],
 }
+
+line_name_map = {v: k for k, v in METRA_LINES.items()}
+selected_line_id = line_name_map["Union Pacific West"]
+
+stops = METRA_STOPS_BY_LINE.get(selected_line_id, [])
+
+print(stops)
