@@ -208,14 +208,13 @@ class MetraTrainSensor(SensorEntity):
         if len(trains) >= self._train_number:
             train = trains[self._train_number - 1]
             return {
-                "oakpark_time": train["oakpark"],
-                "otc_time": train["otc"],
+                "oakpark_arrival": train["oakpark"],
+                "otc_arrival": train["otc"],
                 "oakpark_full": train["oakpark_full"],
                 "otc_full": train["otc_full"],
                 "trip_id": train["trip_id"],
                 "train_number": self._train_number,
                 "last_update": self._coordinator.data.get("last_update"),
-                "is_tomorrow": train.get("date") != datetime.now().date(),
             }
         return {}
 

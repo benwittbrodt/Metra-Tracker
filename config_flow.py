@@ -13,7 +13,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, DEFAULT_NAME, CONF_USERNAME, CONF_PASSWORD
+from .const import (
+    DOMAIN,
+    DEFAULT_NAME,
+    CONF_USERNAME,
+    CONF_PASSWORD,
+    METRA_LINES,
+    METRA_STOPS_BY_LINE,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
