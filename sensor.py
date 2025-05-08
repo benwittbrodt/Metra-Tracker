@@ -224,10 +224,10 @@ class MetraTrainSensor(SensorEntity):
         if len(trains) >= self._train_number:
             train = trains[self._train_number - 1]
             return {
-                "start_time": train["start_time"],
-                "end_time": train["end_time"],
-                "start_full": train["start_full"],
-                "end_full": train["end_full"],
+                f"{self._start_station} arrival": train["start_time"],
+                f"{self._end_station} arrival": train["end_time"],
+                f"{self._start_station} _full": train["start_full"],
+                f"{self._end_station}_full": train["end_full"],
                 "trip_id": train["trip_id"],
                 "train_number": self._train_number,
                 "last_update": self._coordinator.data.get("last_update"),
