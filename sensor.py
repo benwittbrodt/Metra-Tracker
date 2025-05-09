@@ -20,8 +20,7 @@ from .const import (
     CONF_USERNAME,
     CONF_PASSWORD,
     CONF_LINE,
-    CONF_END_STATION,
-    CONF_START_STATION,
+    METRA_LINES,
     DEFAULT_SCAN_INTERVAL,
 )
 
@@ -58,13 +57,15 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=30),  # Explicit 30 seconds
+            update_interval=timedelta(seconds=30),
         )
         self._username = entry.data[CONF_USERNAME]
         self._password = entry.data[CONF_PASSWORD]
-        self._line_id = entry.data[CONF_LINE]  # Line ID from config
-        self._start_station = entry.data[CONF_START_STATION]  # Start station
-        self._end_station = entry.data[CONF_END_STATION]  # End station
+        self._line_id = entry.data[CONF_LINE]
+        self._start_station = entry.data["start_station"]  # Using stop ID
+        self._end_station = entry.data["end_station"]  # Using stop ID
+        self._start_station_name = entry.data["start_station_name"]  # Friendly name
+        self._end_station_name = entry.data["end_station_name"]  # Friendly name
         self._tz = get_time_zone("America/Chicago")
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -77,15 +78,11 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                 timeout=10,
             ) as response:
 
-                _LOGGER.debug("API response status: %s", response.status)
-
                 if response.status != 200:
                     _LOGGER.error("API request failed with status %s", response.status)
                     return {"error": f"API returned {response.status}"}
 
                 data = await response.json()
-                _LOGGER.debug("Received %s trips from API", len(data))
-
                 trains = []
                 current_time = now(self._tz)
 
@@ -126,11 +123,8 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                                 _LOGGER.debug("Error processing stop time: %s", e)
                                 continue
 
-                        # Only add trains with both times
                         if start_time and end_time:
-                            # Calculate time difference from now
                             time_diff = (start_time - current_time).total_seconds()
-
                             trains.append(
                                 {
                                     "start_time": start_time.strftime("%H:%M"),
@@ -144,34 +138,27 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                             )
 
                     except Exception as ex:
-                        _LOGGER.warning("Error processing trip: %s", ex, exc_info=True)
+                        _LOGGER.warning("Error processing trip: %s", ex)
                         continue
 
-                # Sort by time difference (closest upcoming train first)
+                # Sort and filter trains
                 trains.sort(key=lambda x: x["time_diff"])
-
-                # Filter out trains that have already departed (more than 5 minutes ago)
                 upcoming_trains = [t for t in trains if t["time_diff"] > -300]
 
-                # If no upcoming trains, show the next one (even if tomorrow)
                 if not upcoming_trains and trains:
                     upcoming_trains = [trains[0]]
 
-                _LOGGER.debug(
-                    "Processed %d trains on line %s (%d upcoming)",
-                    len(trains),
-                    self._line_id,
-                    len(upcoming_trains),
-                )
-
                 return {
-                    "trains": upcoming_trains[:3],  # Only keep next 3 trains
+                    "trains": upcoming_trains[:3],
                     "count": len(upcoming_trains),
                     "last_update": current_time.isoformat(),
+                    "line_name": METRA_LINES.get(self._line_id, self._line_id),
+                    "start_station_name": self._start_station_name,
+                    "end_station_name": self._end_station_name,
                 }
 
         except Exception as ex:
-            _LOGGER.error("Error fetching data: %s", ex, exc_info=True)
+            _LOGGER.error("Error fetching data: %s", ex)
             return {"error": str(ex)}
 
 
@@ -190,14 +177,14 @@ class MetraTrainSensor(SensorEntity):
         """Initialize the sensor."""
         self._coordinator = coordinator
         self._train_number = train_number
-        self._line_id = entry.data[CONF_LINE]
-        self._start_station = entry.data[CONF_START_STATION]
-        self._end_station = entry.data[CONF_END_STATION]
+        self._entry = entry
+        self._attr_unique_id = f"metra_{entry.entry_id}_train_{train_number}"
 
-        self._attr_name = f"Metra {self._line_id} Train {train_number}"
-        self._attr_unique_id = (
-            f"metra_{self._line_id}_train_{train_number}_{entry.entry_id}"
-        )
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        line_name = self._coordinator.data.get("line_name", "Metra")
+        return f"{line_name} Train {self._train_number}"
 
     @property
     def state(self) -> str:
@@ -208,9 +195,9 @@ class MetraTrainSensor(SensorEntity):
         trains = self._coordinator.data.get("trains", [])
         if len(trains) >= self._train_number:
             train = trains[self._train_number - 1]
-            date_str = ""
-            if train.get("date") != datetime.now().date():
-                date_str = " (Tomorrow)"
+            date_str = (
+                " (Tomorrow)" if train.get("date") != datetime.now().date() else ""
+            )
             return f"{train['start_time']} → {train['end_time']}{date_str}"
         return "No data"
 
@@ -220,19 +207,27 @@ class MetraTrainSensor(SensorEntity):
         if not self.available:
             return {}
 
+        base_attrs = {
+            "last_update": self._coordinator.data.get("last_update"),
+            "train_number": self._train_number,
+        }
+
         trains = self._coordinator.data.get("trains", [])
         if len(trains) >= self._train_number:
             train = trains[self._train_number - 1]
-            return {
-                f"{self._start_station} arrival": train["start_time"],
-                f"{self._end_station} arrival": train["end_time"],
-                f"{self._start_station} _full": train["start_full"],
-                f"{self._end_station}_full": train["end_full"],
-                "trip_id": train["trip_id"],
-                "train_number": self._train_number,
-                "last_update": self._coordinator.data.get("last_update"),
-            }
-        return {}
+            base_attrs.update(
+                {
+                    "departure_time": train["start_time"],
+                    "arrival_time": train["end_time"],
+                    "departure_station": self._coordinator.data["start_station_name"],
+                    "arrival_station": self._coordinator.data["end_station_name"],
+                    "departure_full": train["start_full"],
+                    "arrival_full": train["end_full"],
+                    "trip_id": train["trip_id"],
+                }
+            )
+
+        return base_attrs
 
     @property
     def available(self) -> bool:

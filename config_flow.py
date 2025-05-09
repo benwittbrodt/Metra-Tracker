@@ -15,7 +15,6 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     DOMAIN,
-    DEFAULT_NAME,
     CONF_LINE,
     CONF_USERNAME,
     CONF_PASSWORD,
@@ -90,17 +89,20 @@ class MetraArrivalsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 2: Select train line."""
         errors = {}
 
-        line_name_map = {v: k for k, v in METRA_LINES.items()}  # name -> id
+        # Create mapping of friendly names to line IDs
+        line_options = {
+            friendly_name: line_id for line_id, friendly_name in METRA_LINES.items()
+        }
 
         if user_input is not None:
             selected_name = user_input["line"]
-            self.selected_line_id = line_name_map[selected_name]
+            self.selected_line_id = line_options[selected_name]
             return await self.async_step_stop_select()
 
         return self.async_show_form(
             step_id="line_select",
             data_schema=vol.Schema(
-                {vol.Required("line"): vol.In(list(line_name_map.keys()))}
+                {vol.Required("line"): vol.In(sorted(line_options.keys()))}
             ),
             errors=errors,
         )
@@ -110,22 +112,30 @@ class MetraArrivalsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Step 3: Select start and end stops for selected line."""
         errors = {}
-        stops = METRA_STOPS_BY_LINE.get(self.selected_line_id, [])
 
-        if not stops:
-            errors["base"] = "no_stops"
+        # Get the stop names and IDs for the selected line
+        line_stops = METRA_STOPS_BY_LINE.get(self.selected_line_id, {})
+
+        if not line_stops:
             return self.async_abort(reason="no_stops_found_for_line")
+
+        # Create sorted list of friendly stop names
+        stop_names = sorted(line_stops.values())
+
+        # Create mapping from friendly name back to stop ID
+        name_to_id = {v: k for k, v in line_stops.items()}
 
         if user_input is not None:
             return self.async_create_entry(
-                title=f"Metra: {METRA_LINES[self.selected_line_id]}",
+                title=f"{METRA_LINES[self.selected_line_id]} Arrivals",
                 data={
                     CONF_USERNAME: self.username,
                     CONF_PASSWORD: self.password,
                     CONF_LINE: self.selected_line_id,
-                    "line_id": self.selected_line_id,
-                    "start_station": user_input["start_station"],
-                    "end_station": user_input["end_station"],
+                    "start_station": name_to_id[user_input["start_station"]],
+                    "end_station": name_to_id[user_input["end_station"]],
+                    "start_station_name": user_input["start_station"],
+                    "end_station_name": user_input["end_station"],
                 },
             )
 
@@ -133,8 +143,8 @@ class MetraArrivalsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="stop_select",
             data_schema=vol.Schema(
                 {
-                    vol.Required("start_station"): vol.In(stops),
-                    vol.Required("end_station"): vol.In(stops),
+                    vol.Required("start_station"): vol.In(stop_names),
+                    vol.Required("end_station"): vol.In(stop_names),
                 }
             ),
             errors=errors,
