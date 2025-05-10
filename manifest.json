@@ -13,6 +13,5 @@
     "codeowners": [
         "@benwittbrodt"
     ],
-    "iot_class": "cloud_polling",
-    "logo": "assets/logo.png"
+    "iot_class": "cloud_polling"
 }
