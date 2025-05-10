@@ -8,6 +8,21 @@
                     "username": "Your Username",
                     "password": "Your Password"
                 }
+            },
+            "line_select": {
+                "title": "Select Train Line",
+                "description": "Choose the Metra line you want to track.",
+                "data": {
+                    "line": "Metra Line"
+                }
+            },
+            "stop_select": {
+                "title": "Select Stations",
+                "description": "Choose your starting and ending stations.",
+                "data": {
+                    "start_station": "Start Station",
+                    "end_station": "End Station"
+                }
             }
         }
     }
