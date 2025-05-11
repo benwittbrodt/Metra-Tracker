@@ -8,9 +8,9 @@
     "documentation": "https://github.com/benwittbrodt/Metra-Tracker",
     "iot_class": "cloud_polling",
     "issue_tracker": "https://github.com/benwittbrodt/Metra-Tracker/issues",
-    "version": "1.0.0",
     "requirements": [
         "aiohttp>=3.8.0",
         "pytz"
-    ]
+    ],
+    "version": "1.0.0"
 }
