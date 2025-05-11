@@ -1,5 +1,5 @@
 {
-    "domain": "Metra-Tracker",
+    "domain": "metra_tracker",
     "name": "Metra Tracker",
     "version": "1.0.0",
     "config_flow": true,
