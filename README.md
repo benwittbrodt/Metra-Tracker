@@ -1,5 +1,5 @@
 # Metra Tracker
-
+[![hacs_badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://github.com/hacs/integration)
 # Setup
 Ensure that you have credentials for the METRA API which can be applied for here:  https://metra.com/developers and should only take a day or so to get.
 
