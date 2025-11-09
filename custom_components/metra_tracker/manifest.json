@@ -10,7 +10,8 @@
     "issue_tracker": "https://github.com/benwittbrodt/Metra-Tracker/issues",
     "requirements": [
         "aiohttp>=3.8.0",
-        "pytz"
+        "pytz",
+        "gtfs-realtime-bindings==1.0.0"
     ],
-    "version": "1.0.0"
+    "version": "1.5.0"
 }

@@ -1,12 +1,14 @@
-"""Sensor platform for Metra train arrivals."""
+"""Sensor platform for Metra train arrivals (Public GTFS API)."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 import logging
 from typing import Any
-
+from google.transit import gtfs_realtime_pb2
+import io
 import aiohttp
+
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -17,8 +19,7 @@ from homeassistant.util.dt import get_time_zone, now
 
 from .const import (
     DOMAIN,
-    CONF_USERNAME,
-    CONF_PASSWORD,
+    CONF_API_TOKEN,
     CONF_LINE,
     METRA_LINES,
     DEFAULT_SCAN_INTERVAL,
@@ -33,12 +34,11 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the sensor platform."""
+    """Set up Metra Tracker sensors from a config entry."""
     coordinator = MetraArrivalsCoordinator(hass, entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await coordinator.async_config_entry_first_refresh()
 
-    # Create three sensors (one for each of the next three trains)
     async_add_entities(
         [
             MetraTrainSensor(coordinator, entry, 1),
@@ -49,99 +49,94 @@ async def async_setup_entry(
 
 
 class MetraArrivalsCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Metra data."""
+    """Class to manage fetching and parsing Metra GTFS trip updates."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        """Initialize."""
+        """Initialize the coordinator."""
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=30),
+            update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
-        self._username = entry.data[CONF_USERNAME]
-        self._password = entry.data[CONF_PASSWORD]
+        self._api_token = entry.data[CONF_API_TOKEN]
         self._line_id = entry.data[CONF_LINE]
-        self._start_station = entry.data["start_station"]  # Using stop ID
-        self._end_station = entry.data["end_station"]  # Using stop ID
-        self._start_station_name = entry.data["start_station_name"]  # Friendly name
-        self._end_station_name = entry.data["end_station_name"]  # Friendly name
+        self._start_station = entry.data["start_station"]
+        self._end_station = entry.data["end_station"]
+        self._start_station_name = entry.data["start_station_name"]
+        self._end_station_name = entry.data["end_station_name"]
         self._tz = get_time_zone("America/Chicago")
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch and process train data from Metra API."""
+        """Fetch and process train data from Metra GTFS public feed."""
         try:
             session = async_get_clientsession(self.hass)
-            async with session.get(
-                "https://gtfsapi.metrarail.com/gtfs/tripUpdates",
-                auth=aiohttp.BasicAuth(self._username, self._password),
-                timeout=10,
-            ) as response:
+            url = f"https://gtfspublic.metrarr.com/gtfs/public/tripupdates?api_token={self._api_token}"
 
+            async with session.get(url, timeout=15) as response:
                 if response.status != 200:
-                    _LOGGER.error("API request failed with status %s", response.status)
-                    return {"error": f"API returned {response.status}"}
+                    _LOGGER.error("API request failed: %s", response.status)
+                    return {"error": f"HTTP {response.status}"}
 
-                data = await response.json()
+                # Parse protobuf (binary)
+                raw_bytes = await response.read()
+                feed = gtfs_realtime_pb2.FeedMessage()
+                feed.ParseFromString(raw_bytes)
+                _LOGGER.debug("Decoded %d GTFS entities", len(feed.entity))
+
                 trains = []
                 current_time = now(self._tz)
 
-                for item in data:
-                    try:
-                        trip = item.get("trip_update", {})
-                        trip_info = trip.get("trip", {})
-
-                        # Only process selected line
-                        if trip_info.get("route_id") != self._line_id:
-                            continue
-
-                        start_time = None
-                        end_time = None
-
-                        # Process all stops for this train
-                        for stop in trip.get("stop_time_update", []):
-                            stop_id = stop.get("stop_id")
-                            arrival_raw = (
-                                stop.get("arrival", {}).get("time", {}).get("low")
-                            )
-
-                            if not arrival_raw:
-                                continue
-
-                            try:
-                                dt = datetime.fromisoformat(
-                                    arrival_raw.replace("Z", "+00:00")
-                                )
-                                local_time = dt.astimezone(self._tz)
-
-                                if stop_id == self._start_station:
-                                    start_time = local_time
-                                elif stop_id == self._end_station:
-                                    end_time = local_time
-
-                            except Exception as e:
-                                _LOGGER.debug("Error processing stop time: %s", e)
-                                continue
-
-                        if start_time and end_time:
-                            time_diff = (start_time - current_time).total_seconds()
-                            trains.append(
-                                {
-                                    "start_time": start_time.strftime("%H:%M"),
-                                    "end_time": end_time.strftime("%H:%M"),
-                                    "start_full": start_time.isoformat(),
-                                    "end_full": end_time.isoformat(),
-                                    "trip_id": trip_info.get("trip_id", "unknown"),
-                                    "time_diff": time_diff,
-                                    "date": start_time.date(),
-                                }
-                            )
-
-                    except Exception as ex:
-                        _LOGGER.warning("Error processing trip: %s", ex)
+                for entity in feed.entity:
+                    if not entity.HasField("trip_update"):
                         continue
 
-                # Sort and filter trains
+                    trip_update = entity.trip_update
+                    trip = trip_update.trip
+                    if trip.route_id != self._line_id:
+                        continue
+                    if trip.route_id == self._line_id:
+                        stop_ids = [stu.stop_id for stu in trip_update.stop_time_update]
+                        _LOGGER.debug("Route %s has stops: %s", trip.route_id, stop_ids)
+                    start_time = None
+                    end_time = None
+
+                    for stu in trip_update.stop_time_update:
+                        stop_id = stu.stop_id
+                        if stu.arrival.time == 0:
+                            continue
+
+                        arrival_time = datetime.fromtimestamp(
+                            stu.arrival.time, tz=self._tz
+                        )
+                        # Logs to make sure the start and end stop are found for the given line
+                        if stop_id in (self._start_station, self._end_station):
+                            _LOGGER.debug(
+                                "Matched stop %s for route %s (feed stop_id=%s)",
+                                stop_id,
+                                self._line_id,
+                                stop_id,
+                            )
+
+                        if stop_id == self._start_station:
+                            start_time = arrival_time
+                        elif stop_id == self._end_station:
+                            end_time = arrival_time
+
+                    if start_time and end_time:
+                        time_diff = (start_time - current_time).total_seconds()
+                        trains.append(
+                            {
+                                "start_time": start_time.strftime("%H:%M"),
+                                "end_time": end_time.strftime("%H:%M"),
+                                "start_full": start_time.isoformat(),
+                                "end_full": end_time.isoformat(),
+                                "trip_id": trip.trip_id or "unknown",
+                                "time_diff": time_diff,
+                                "date": start_time.date(),
+                            }
+                        )
+
                 trains.sort(key=lambda x: x["time_diff"])
                 upcoming_trains = [t for t in trains if t["time_diff"] > -300]
 
@@ -158,12 +153,12 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                 }
 
         except Exception as ex:
-            _LOGGER.error("Error fetching data: %s", ex)
+            _LOGGER.exception("Error fetching or decoding GTFS data: %s", ex)
             return {"error": str(ex)}
 
 
 class MetraTrainSensor(SensorEntity):
-    """Representation of a Metra Train arrival sensor."""
+    """Representation of an individual upcoming Metra train."""
 
     _attr_icon = "mdi:train"
     _attr_has_entity_name = True
@@ -182,13 +177,13 @@ class MetraTrainSensor(SensorEntity):
 
     @property
     def name(self) -> str:
-        """Return the name of the sensor."""
+        """Return the sensor’s display name."""
         line_name = self._coordinator.data.get("line_name", "Metra")
         return f"{line_name} Train {self._train_number}"
 
     @property
     def state(self) -> str:
-        """Return the state of the sensor."""
+        """Return the main state string."""
         if not self.available:
             return "Unavailable"
 
@@ -199,11 +194,11 @@ class MetraTrainSensor(SensorEntity):
                 " (Tomorrow)" if train.get("date") != datetime.now().date() else ""
             )
             return f"{train['start_time']} → {train['end_time']}{date_str}"
-        return "No data"
+        return "No trains scheduled within 60 min"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return additional attributes."""
+        """Return detailed attributes."""
         if not self.available:
             return {}
 
@@ -231,14 +226,14 @@ class MetraTrainSensor(SensorEntity):
 
     @property
     def available(self) -> bool:
-        """Return True if entity is available."""
+        """Return whether data is valid."""
         return (
             self._coordinator.last_update_success
             and "error" not in self._coordinator.data
         )
 
     async def async_added_to_hass(self) -> None:
-        """Subscribe to updates."""
+        """Subscribe to coordinator updates."""
         await super().async_added_to_hass()
         self.async_on_remove(
             self._coordinator.async_add_listener(self.async_write_ha_state)
@@ -246,5 +241,5 @@ class MetraTrainSensor(SensorEntity):
 
     @property
     def should_poll(self) -> bool:
-        """Return False as updates are handled by coordinator."""
+        """Return False (we use the coordinator)."""
         return False

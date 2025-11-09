@@ -15,9 +15,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     DOMAIN,
+    CONF_API_TOKEN,
     CONF_LINE,
-    CONF_USERNAME,
-    CONF_PASSWORD,
     METRA_LINES,
     METRA_STOPS_BY_LINE,
 )
@@ -25,61 +24,60 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-async def validate_auth(username: str, password: str, hass: HomeAssistant) -> bool:
-    """Validate credentials with Metra API."""
+async def validate_token(api_token: str, hass: HomeAssistant) -> bool:
+    """Validate API token with Metra public GTFS endpoint."""
     session = async_get_clientsession(hass)
+    url = (
+        f"https://gtfspublic.metrarr.com/gtfs/public/tripupdates?api_token={api_token}"
+    )
 
     try:
-        async with session.get(
-            "https://gtfsapi.metrarail.com/gtfs/tripUpdates",
-            auth=aiohttp.BasicAuth(username, password),
-            timeout=10,
-            ssl=False,
-        ) as response:
-            if response.status == 401:
+        async with session.get(url, timeout=10) as response:
+            if response.status != 200:
+                _LOGGER.error("Invalid token or request failed: %s", response.status)
                 return False
-            data = await response.json()
-            return isinstance(data, list)
+
+            # Basic sanity check: expecting GTFS Realtime feed (protobuf or JSON)
+            content_type = response.headers.get("Content-Type", "")
+            if "application/json" in content_type:
+                data = await response.json()
+                return isinstance(data, (dict, list))
+            else:
+                # For protobuf, just assume success on HTTP 200
+                return True
     except Exception as ex:
-        _LOGGER.error("Validation error: %s", ex)
+        _LOGGER.error("Error validating token: %s", ex)
         return False
 
 
 class MetraArrivalsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Metra Tracker."""
 
-    VERSION = 1
+    VERSION = 2
     CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
 
     def __init__(self):
-        self.username = None
-        self.password = None
+        self.api_token = None
         self.selected_line_id = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1: Get credentials."""
+        """Step 1: Get API token."""
         errors = {}
 
         if user_input is not None:
-            self.username = user_input[CONF_USERNAME]
-            self.password = user_input[CONF_PASSWORD]
-            await self.async_set_unique_id(self.username)
+            self.api_token = user_input[CONF_API_TOKEN]
+            await self.async_set_unique_id(self.api_token)
             self._abort_if_unique_id_configured()
 
-            if await validate_auth(self.username, self.password, self.hass):
+            if await validate_token(self.api_token, self.hass):
                 return await self.async_step_line_select()
-            errors["base"] = "invalid_auth"
+            errors["base"] = "invalid_token"
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_USERNAME): str,
-                    vol.Required(CONF_PASSWORD): str,
-                }
-            ),
+            data_schema=vol.Schema({vol.Required(CONF_API_TOKEN): str}),
             errors=errors,
         )
 
@@ -89,7 +87,6 @@ class MetraArrivalsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 2: Select train line."""
         errors = {}
 
-        # Create mapping of friendly names to line IDs
         line_options = {
             friendly_name: line_id for line_id, friendly_name in METRA_LINES.items()
         }
@@ -113,24 +110,19 @@ class MetraArrivalsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 3: Select start and end stops for selected line."""
         errors = {}
 
-        # Get the stop names and IDs for the selected line
         line_stops = METRA_STOPS_BY_LINE.get(self.selected_line_id, {})
 
         if not line_stops:
             return self.async_abort(reason="no_stops_found_for_line")
 
-        # Create sorted list of friendly stop names
         stop_names = sorted(line_stops.values())
-
-        # Create mapping from friendly name back to stop ID
         name_to_id = {v: k for k, v in line_stops.items()}
 
         if user_input is not None:
             return self.async_create_entry(
                 title=f"{METRA_LINES[self.selected_line_id]} Arrivals",
                 data={
-                    CONF_USERNAME: self.username,
-                    CONF_PASSWORD: self.password,
+                    CONF_API_TOKEN: self.api_token,
                     CONF_LINE: self.selected_line_id,
                     "start_station": name_to_id[user_input["start_station"]],
                     "end_station": name_to_id[user_input["end_station"]],
