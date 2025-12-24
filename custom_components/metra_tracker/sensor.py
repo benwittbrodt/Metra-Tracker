@@ -16,6 +16,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util.dt import get_time_zone, now
+from homeassistant.helpers.device_registry import async_get
 
 from .const import (
     DOMAIN,
@@ -39,13 +40,26 @@ async def async_setup_entry(
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await coordinator.async_config_entry_first_refresh()
 
-    async_add_entities(
-        [
-            MetraTrainSensor(coordinator, entry, 1),
-            MetraTrainSensor(coordinator, entry, 2),
-            MetraTrainSensor(coordinator, entry, 3),
-        ]
+    device_registry = async_get(hass)
+    device = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        configuration_url="https://metra.com/metra-gtfs-api",
+        identifiers={(DOMAIN, entry.entry_id)},
+        manufacturer="Metra",
+        name=entry.title,
     )
+
+    trainsensors = [
+        MetraTrainSensor(coordinator, entry, 1, device),
+        MetraTrainSensor(coordinator, entry, 2, device),
+        MetraTrainSensor(coordinator, entry, 3, device),
+    ]
+    async_add_entities(trainsensors, update_before_add=True)
+
+    hass.data[DOMAIN][entry] = {
+        "device": device,
+        "sensors": trainsensors,
+    }
 
 
 class MetraArrivalsCoordinator(DataUpdateCoordinator):
@@ -168,12 +182,23 @@ class MetraTrainSensor(SensorEntity):
         coordinator: MetraArrivalsCoordinator,
         entry: ConfigEntry,
         train_number: int,
+        device,
     ) -> None:
         """Initialize the sensor."""
         self._coordinator = coordinator
         self._train_number = train_number
         self._entry = entry
         self._attr_unique_id = f"metra_{entry.entry_id}_train_{train_number}"
+        self._device = device
+
+    @property
+    def device_info(self):
+        """Return device information for linking the sensor to the device."""
+        return {
+            "identifiers": self._device.identifiers,
+            "name": self._device.name,
+            "manufacturer": self._device.manufacturer,
+        }
 
     @property
     def name(self) -> str:
