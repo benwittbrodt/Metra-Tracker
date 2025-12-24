@@ -68,8 +68,8 @@ class MetraArrivalsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self.api_token = user_input[CONF_API_TOKEN]
-            await self.async_set_unique_id(self.api_token)
-            self._abort_if_unique_id_configured()
+            # await self.async_set_unique_id(self.api_token)
+            # self._abort_if_unique_id_configured()
 
             if await validate_token(self.api_token, self.hass):
                 return await self.async_step_line_select()
