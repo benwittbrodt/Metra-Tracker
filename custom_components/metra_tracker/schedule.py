@@ -3,8 +3,7 @@
 Provides: async_get_next_scheduled_trips(...)
 - Ensures trips stop at BOTH start and end stop_ids
 - Ensures end stop_sequence > start stop_sequence (filters reverse direction / wrong ordering)
-- Looks ahead across days (default 7) until it finds N trips
-- Handles GTFS times >= 24:00:00 (e.g., 25:10:00)
+- Looks ahead across days (default 7) until it finds N (default 3) trips
 """
 
 from __future__ import annotations
@@ -15,7 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant
-from homeassistant.util.dt import as_local
+
+# from homeassistant.util.dt import as_local
 
 import aiohttp
 

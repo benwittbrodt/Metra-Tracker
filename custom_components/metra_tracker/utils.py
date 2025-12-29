@@ -12,7 +12,9 @@ is used as a fallback reference.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 from datetime import datetime, timedelta, timezone
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -24,8 +26,6 @@ import aiohttp
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util.dt import utcnow
-
-from .const import DOMAIN, METRA_STOPS_BY_LINE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,22 +50,52 @@ _META_NAME = "schedule_meta.json"
 # How often we check published.txt when HA is running
 _PUBLISHED_CHECK_INTERVAL = timedelta(hours=24)
 # Hard refresh even if published.txt isn't reachable
-_MAX_ZIP_AGE = timedelta(days=10)
+_MAX_ZIP_AGE = timedelta(days=7)
+
+
+_STOP_ID_TO_NAME: dict[str, str] = {}
+_STOP_CACHE_LOCK = asyncio.Lock()
+_STOP_CACHE_READY = False
+
+
+async def async_init_stop_name_cache(
+    hass: HomeAssistant, session: aiohttp.ClientSession
+) -> None:
+    """Load stops.txt into an in-memory stop_id -> stop_name cache (once)."""
+    global _STOP_CACHE_READY, _STOP_ID_TO_NAME
+
+    if _STOP_CACHE_READY:
+        return
+
+    async with _STOP_CACHE_LOCK:
+        if _STOP_CACHE_READY:
+            return
+
+        zip_path = await async_get_schedule_zip_path(hass, session)
+        rows = await hass.async_add_executor_job(
+            _read_gtfs_table_sync, zip_path, "stops.txt"
+        )
+
+        mapping: dict[str, str] = {}
+        for r in rows:
+            sid = (r.get("stop_id") or "").strip()
+            sname = (r.get("stop_name") or "").strip()
+            if sid and sname:
+                mapping[sid] = sname
+
+        _STOP_ID_TO_NAME = mapping
+        _STOP_CACHE_READY = True
 
 
 def stop_name(line: str, stop_code: str) -> str:
-    """Return the human readable name for a stop code (fallback to code)."""
-    return METRA_STOPS_BY_LINE.get(line, {}).get(stop_code, stop_code)
+    """Return human readable name for a stop_id (from schedule.zip cache)."""
+    # line is kept for API compatibility; stops are not line-specific in GTFS
+    code = (stop_code or "").strip()
+    return _STOP_ID_TO_NAME.get(code, code)
 
 
 def stop_display(line: str, stop_code: str) -> str:
-    """Return a UI label for a stop.
-
-    Rules (per your preference):
-    - OTC -> "OTC" (not "Chicago OTC")
-    - CUS or "Chicago Union Station" -> "Union Station"
-    - otherwise -> human readable name from METRA_STOPS_BY_LINE
-    """
+    """Return a UI label for a stop while controlling for OTC and Union Station names."""
     name = stop_name(line, stop_code)
 
     if stop_code == "OTC" or name == "Chicago OTC":
@@ -94,11 +124,6 @@ def device_destination_label(line: str, stop_code: str) -> str:
 def build_device_name(line: str, end_code: str) -> str:
     """Device name (groups entities)."""
     return f"{line} to {device_destination_label(line, end_code)}"
-
-
-def build_entry_title(line: str, end_code: str) -> str:
-    """Config entry title shown on the Integrations page."""
-    return build_device_name(line, end_code)
 
 
 def _cache_dir(hass: HomeAssistant) -> Path:
@@ -302,7 +327,7 @@ def _parse_dt(v: Any) -> datetime | None:
 def _read_gtfs_table_sync(zip_path: Path, table_name: str) -> list[dict[str, str]]:
     """Read a GTFS .txt table from schedule.zip into memory (sync).
 
-    Normalizes column names + values by stripping whitespace.
+    Normalizes column names + values by stripping whitespace (GTFS often has BOM/spacey headers).
     """
     with zipfile.ZipFile(zip_path) as zf:
         with zf.open(table_name) as raw:
@@ -314,25 +339,16 @@ def _read_gtfs_table_sync(zip_path: Path, table_name: str) -> list[dict[str, str
                 cleaned: dict[str, str] = {}
                 for k, v in r.items():
                     kk = (k or "").strip()
-                    vv = (
-                        (v or "").strip()
-                        if isinstance(v, str)
-                        else ("" if v is None else str(v))
-                    )
+                    if isinstance(v, str):
+                        vv = v.strip()
+                    elif v is None:
+                        vv = ""
+                    else:
+                        vv = str(v).strip()
                     cleaned[kk] = vv
                 rows.append(cleaned)
 
             return rows
-
-
-async def async_read_gtfs_table(
-    hass: HomeAssistant, session: aiohttp.ClientSession, table_name: str
-) -> list[dict[str, str]]:
-    """Ensure schedule.zip is cached, then read the requested GTFS table."""
-    status = await async_ensure_schedule_zip(hass, session)
-    return await hass.async_add_executor_job(
-        _read_gtfs_table_sync, status.zip_path, table_name
-    )
 
 
 async def async_get_schedule_zip_path(
@@ -341,3 +357,100 @@ async def async_get_schedule_zip_path(
     """Return the on-disk path to the cached schedule.zip (ensuring it exists)."""
     status = await async_ensure_schedule_zip(hass, session)
     return status.zip_path
+
+
+@dataclass(frozen=True)
+class RouteContext:
+    """All metadata needed for a configured route (entry)."""
+
+    route_id: str
+    route_short_name: str
+    route_long_name: str
+    origin_stop_id: str
+    destination_stop_id: str
+    stop_id_to_name: Mapping[str, str]
+
+    @property
+    def route_label(self) -> str:
+        # Prefer short name (e.g., UP-W), else long, else route_id
+        return self.route_short_name or self.route_long_name or self.route_id
+
+    def stop_name(self, stop_id: str) -> str:
+        sid = (stop_id or "").strip()
+        return self.stop_id_to_name.get(sid, sid)
+
+    def stop_display(self, stop_id: str) -> str:
+        """UI-friendly stop label (your special cases)."""
+        sid = (stop_id or "").strip().upper()
+        name = self.stop_name(stop_id)
+
+        if sid == "OTC" or name == "Chicago OTC":
+            return "OTC"
+        if sid == "CUS" or name == "Chicago Union Station":
+            return "Union Station"
+        return name
+
+    def entity_name(self, train_number: int) -> str:
+        """Entity name shown in HA."""
+        start = self.stop_display(self.origin_stop_id)
+        end = self.stop_display(self.destination_stop_id)
+        return f"{self.route_label} {start} → {end} ({train_number})"
+
+    def destination_label(self) -> str:
+        return self.stop_display(self.destination_stop_id)
+
+
+def _build_route_context_sync(
+    zip_path: Path, route_id: str, origin_stop_id: str, destination_stop_id: str
+) -> RouteContext:
+    """Build RouteContext from schedule.zip (sync; run in executor)."""
+    route_id = (route_id or "").strip()
+    origin_stop_id = (origin_stop_id or "").strip()
+    destination_stop_id = (destination_stop_id or "").strip()
+
+    # stops
+    stops_rows = _read_gtfs_table_sync(zip_path, "stops.txt")
+    stop_id_to_name: dict[str, str] = {}
+    for r in stops_rows:
+        sid = (r.get("stop_id") or "").strip()
+        sname = (r.get("stop_name") or "").strip()
+        if sid and sname:
+            stop_id_to_name[sid] = sname
+
+    # routes
+    routes_rows = _read_gtfs_table_sync(zip_path, "routes.txt")
+    short = ""
+    long = ""
+    for r in routes_rows:
+        rid = (r.get("route_id") or "").strip()
+        if rid == route_id:
+            short = (r.get("route_short_name") or "").strip()
+            long = (r.get("route_long_name") or "").strip()
+            break
+
+    return RouteContext(
+        route_id=route_id,
+        route_short_name=short,
+        route_long_name=long,
+        origin_stop_id=origin_stop_id,
+        destination_stop_id=destination_stop_id,
+        stop_id_to_name=stop_id_to_name,
+    )
+
+
+async def async_build_route_context(
+    hass: HomeAssistant,
+    session: aiohttp.ClientSession,
+    route_id: str,
+    origin_stop_id: str,
+    destination_stop_id: str,
+) -> RouteContext:
+    """Ensure schedule.zip exists, then build a RouteContext."""
+    zip_path = await async_get_schedule_zip_path(hass, session)
+    return await hass.async_add_executor_job(
+        _build_route_context_sync,
+        zip_path,
+        route_id,
+        origin_stop_id,
+        destination_stop_id,
+    )

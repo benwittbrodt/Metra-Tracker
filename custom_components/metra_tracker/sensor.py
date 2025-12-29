@@ -15,17 +15,23 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util.dt import get_time_zone, now as ha_now
 from homeassistant.helpers.device_registry import async_get
+from homeassistant.util import slugify
 
 from .const import (
     DOMAIN,
     CONF_API_TOKEN,
     CONF_LINE,
-    METRA_LINES,
     DEFAULT_SCAN_INTERVAL,
     CONF_ORIGIN_STATION,
     CONF_DEST_STATION,
 )
-from .utils import build_entity_name, async_ensure_schedule_zip, _LOGGER
+
+from .utils import (
+    async_ensure_schedule_zip,
+    async_build_route_context,
+    _LOGGER,
+)
+
 from .schedule import async_get_next_scheduled_trips
 
 
@@ -55,7 +61,6 @@ async def async_setup_entry(
     ]
     async_add_entities(trainsensors, update_before_add=True)
 
-    # store by entry_id (not entry object)
     hass.data[DOMAIN][entry.entry_id] = {
         "device": device,
         "sensors": trainsensors,
@@ -72,22 +77,29 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
             name=DOMAIN,
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
-        self._api_token = (entry.data[CONF_API_TOKEN] or "").strip()
-        self._line_id = (entry.data[CONF_LINE] or "").strip()
+        self._api_token = (entry.data.get(CONF_API_TOKEN) or "").strip()
 
-        # These are stop_ids (e.g., OTC / OAKPARK)
-        self._start_station = (entry.data["start_station"] or "").strip()
-        self._end_station = (entry.data["end_station"] or "").strip()
+        # Stored as route_id (per GTFS)
+        self._route_id = (entry.data.get(CONF_LINE) or "").strip()
 
-        # These are display names
-        self._start_station_name = entry.data["start_station_name"]
-        self._end_station_name = entry.data["end_station_name"]
+        # Stored as stop_id codes
+        self._origin_stop_id = (entry.data.get(CONF_ORIGIN_STATION) or "").strip()
+        self._destination_stop_id = (entry.data.get(CONF_DEST_STATION) or "").strip()
 
         self._tz = get_time_zone("America/Chicago")
-        self._schedule_status = None  # set by async_ensure_schedule_zip()
+        self._schedule_status = None
+        self._ctx = None  # RouteContext, built lazily
+
+    @property
+    def ctx(self):
+        """Expose RouteContext to sensors."""
+        return self._ctx
 
     async def _fetch_realtime_by_trip(self, session) -> dict[str, dict[str, Any]]:
-        """Return realtime predictions indexed by trip_id for our route."""
+        """Return realtime predictions indexed by trip_id for our configured route."""
+        if not self._api_token:
+            return {}
+
         url = f"https://gtfspublic.metrarr.com/gtfs/public/tripupdates?api_token={self._api_token}"
         realtime: dict[str, dict[str, Any]] = {}
 
@@ -99,6 +111,10 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
             feed = gtfs_realtime_pb2.FeedMessage()
             feed.ParseFromString(raw_bytes)
 
+        ctx = self._ctx
+        if ctx is None:
+            return {}
+
         for entity in feed.entity:
             if not entity.HasField("trip_update"):
                 continue
@@ -106,36 +122,37 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
             tu = entity.trip_update
             trip = tu.trip
 
-            if (trip.route_id or "").strip() != self._line_id:
+            if (trip.route_id or "").strip() != ctx.route_id:
                 continue
 
             trip_id = (trip.trip_id or "").strip()
             if not trip_id:
                 continue
 
-            live_start: datetime | None = None
-            live_end: datetime | None = None
-            live_start_delay_min: int | None = None
+            live_dep: datetime | None = None
+            live_arr: datetime | None = None
+            live_delay_min: int | None = None
 
             for stu in tu.stop_time_update:
                 stop_id = (stu.stop_id or "").strip()
 
-                # Origin: prefer departure.time, fallback arrival.time
-                if stop_id == self._start_station:
+                # ORIGIN: prefer departure.time, fallback arrival.time
+                if stop_id == ctx.origin_stop_id:
                     ts = 0
                     if stu.HasField("departure") and getattr(stu.departure, "time", 0):
                         ts = int(stu.departure.time)
                         if getattr(stu.departure, "delay", None) is not None:
-                            live_start_delay_min = int(stu.departure.delay) // 60
+                            live_delay_min = int(stu.departure.delay) // 60
                     elif stu.HasField("arrival") and getattr(stu.arrival, "time", 0):
                         ts = int(stu.arrival.time)
                         if getattr(stu.arrival, "delay", None) is not None:
-                            live_start_delay_min = int(stu.arrival.delay) // 60
-                    if ts:
-                        live_start = datetime.fromtimestamp(ts, tz=self._tz)
+                            live_delay_min = int(stu.arrival.delay) // 60
 
-                # Destination: prefer arrival.time, fallback departure.time
-                if stop_id == self._end_station:
+                    if ts:
+                        live_dep = datetime.fromtimestamp(ts, tz=self._tz)
+
+                # DESTINATION: prefer arrival.time, fallback departure.time
+                if stop_id == ctx.destination_stop_id:
                     ts = 0
                     if stu.HasField("arrival") and getattr(stu.arrival, "time", 0):
                         ts = int(stu.arrival.time)
@@ -143,14 +160,15 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                         stu.departure, "time", 0
                     ):
                         ts = int(stu.departure.time)
-                    if ts:
-                        live_end = datetime.fromtimestamp(ts, tz=self._tz)
 
-            if live_start or live_end:
+                    if ts:
+                        live_arr = datetime.fromtimestamp(ts, tz=self._tz)
+
+            if live_dep or live_arr:
                 realtime[trip_id] = {
-                    "live_start_dt": live_start,
-                    "live_end_dt": live_end,
-                    "delay_min": live_start_delay_min,
+                    "live_dep_dt": live_dep,
+                    "live_arr_dt": live_arr,
+                    "delay_min": live_delay_min,
                 }
 
         return realtime
@@ -161,7 +179,7 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
         try:
             session = async_get_clientsession(self.hass)
 
-            # Ensure schedule.zip exists (best effort); schedule.py uses utils to read it.
+            # Ensure schedule.zip exists (and capture status for debugging)
             try:
                 self._schedule_status = await async_ensure_schedule_zip(
                     self.hass, session
@@ -170,13 +188,27 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                 self._schedule_status = None
                 _LOGGER.debug("Could not ensure schedule.zip cache.", exc_info=True)
 
-            # 1) Scheduled next 3 trips (filters express + includes tomorrow)
+            # Build RouteContext once (uses cached schedule.zip)
+            if self._ctx is None:
+                self._ctx = await async_build_route_context(
+                    self.hass,
+                    session,
+                    route_id=self._route_id,
+                    origin_stop_id=self._origin_stop_id,
+                    destination_stop_id=self._destination_stop_id,
+                )
+
+            ctx = self._ctx
+            if ctx is None:
+                return {"error": "RouteContext not initialized"}
+
+            # 1) Scheduled: next trips INCLUDING tomorrow (lookahead_days)
             scheduled = await async_get_next_scheduled_trips(
                 self.hass,
                 session,
-                route_short_or_id=self._line_id,
-                start_stop_id=self._start_station,
-                end_stop_id=self._end_station,
+                route_short_or_id=ctx.route_id,  # schedule.py can resolve short/id
+                start_stop_id=ctx.origin_stop_id,
+                end_stop_id=ctx.destination_stop_id,
                 now_local=current_time,
                 limit=3,
                 lookahead_days=7,
@@ -186,36 +218,37 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
             realtime_by_trip = await self._fetch_realtime_by_trip(session)
 
             trains: list[dict[str, Any]] = []
+
             for s in scheduled:
                 trip_id = s["trip_id"]
 
                 sched_dep_dt: datetime = s["scheduled_departure_dt"]
-                sched_arr_dt: datetime | None = s["scheduled_arrival_dt"]
+                sched_arr_dt: datetime | None = s.get("scheduled_arrival_dt")
 
                 live = realtime_by_trip.get(trip_id, {})
-                live_dep_dt: datetime | None = live.get("live_start_dt")
-                live_arr_dt: datetime | None = live.get("live_end_dt")
+                live_dep_dt: datetime | None = live.get("live_dep_dt")
+                live_arr_dt: datetime | None = live.get("live_arr_dt")
 
                 dep_dt = live_dep_dt or sched_dep_dt
                 arr_dt = live_arr_dt or sched_arr_dt
 
                 is_live = bool(live_dep_dt or live_arr_dt)
+
                 delay_min = live.get("delay_min")
                 if delay_min is None and live_dep_dt:
                     delay_min = int((live_dep_dt - sched_dep_dt).total_seconds() // 60)
 
                 trains.append(
                     {
-                        # Primary times (used by sensor)
+                        # Primary times (used by sensor state)
                         "start_time": dep_dt.strftime("%H:%M"),
                         "end_time": arr_dt.strftime("%H:%M") if arr_dt else None,
                         "start_full": dep_dt.isoformat(),
                         "end_full": arr_dt.isoformat() if arr_dt else None,
                         "date": dep_dt.date(),
                         "trip_id": trip_id,
-                        # Requested indicator
                         "is_live": is_live,
-                        # Keep all relevant extras
+                        # Schedule baseline
                         "scheduled_start_time": sched_dep_dt.strftime("%H:%M"),
                         "scheduled_end_time": (
                             sched_arr_dt.strftime("%H:%M") if sched_arr_dt else None
@@ -225,31 +258,34 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                             sched_arr_dt.isoformat() if sched_arr_dt else None
                         ),
                         "delay_min": delay_min,
+                        # Extra info from schedule.py
                         "trip_headsign": s.get("trip_headsign"),
                         "direction_id": s.get("direction_id"),
                         "service_id": s.get("service_id"),
-                        "route_id": s.get("route_id"),
+                        "route_id": s.get("route_id") or ctx.route_id,
                     }
                 )
 
-            # If we somehow got nothing scheduled, fall back to realtime-only (best effort)
-            if not trains:
-                realtime_trains: list[dict[str, Any]] = []
+            # Best-effort fallback: realtime-only if schedule lookup yields nothing
+            if not trains and realtime_by_trip:
+                fallback: list[dict[str, Any]] = []
                 for trip_id, live in realtime_by_trip.items():
-                    live_start = live.get("live_start_dt")
-                    live_end = live.get("live_end_dt")
-                    if not (live_start and live_end):
+                    live_dep = live.get("live_dep_dt")
+                    live_arr = live.get("live_arr_dt")
+                    if not live_dep:
                         continue
-                    # keep upcoming-ish
-                    if (live_start - current_time).total_seconds() < -300:
+                    if (live_dep - current_time).total_seconds() < -300:
                         continue
-                    realtime_trains.append(
+
+                    fallback.append(
                         {
-                            "start_time": live_start.strftime("%H:%M"),
-                            "end_time": live_end.strftime("%H:%M"),
-                            "start_full": live_start.isoformat(),
-                            "end_full": live_end.isoformat(),
-                            "date": live_start.date(),
+                            "start_time": live_dep.strftime("%H:%M"),
+                            "end_time": (
+                                live_arr.strftime("%H:%M") if live_arr else None
+                            ),
+                            "start_full": live_dep.isoformat(),
+                            "end_full": live_arr.isoformat() if live_arr else None,
+                            "date": live_dep.date(),
                             "trip_id": trip_id,
                             "is_live": True,
                             "scheduled_start_time": None,
@@ -257,19 +293,20 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                             "scheduled_start_full": None,
                             "scheduled_end_full": None,
                             "delay_min": live.get("delay_min"),
+                            "route_id": ctx.route_id,
                         }
                     )
 
-                realtime_trains.sort(key=lambda x: x["start_full"])
-                trains = realtime_trains[:3]
+                fallback.sort(key=lambda x: x["start_full"])
+                trains = fallback[:3]
 
             return {
                 "trains": trains,
                 "count": len(trains),
                 "last_update": current_time.isoformat(),
-                "line_name": METRA_LINES.get(self._line_id, self._line_id),
-                "start_station_name": self._start_station_name,
-                "end_station_name": self._end_station_name,
+                "line_name": ctx.route_label,
+                "start_station_name": ctx.stop_display(ctx.origin_stop_id),
+                "end_station_name": ctx.stop_display(ctx.destination_stop_id),
             }
 
         except Exception as ex:  # noqa: BLE001
@@ -296,10 +333,18 @@ class MetraTrainSensor(SensorEntity):
         self._attr_unique_id = f"metra_{entry.entry_id}_train_{train_number}"
         self._device = device
 
-        line = entry.data.get(CONF_LINE)
-        start_code = entry.data.get(CONF_ORIGIN_STATION)
-        end_code = entry.data.get(CONF_DEST_STATION)
-        self._attr_name = build_entity_name(line, start_code, end_code, train_number)
+        ctx = coordinator.ctx
+        if ctx is not None:
+            self._attr_name = ctx.entity_name(train_number)
+
+            start_disp = ctx.stop_display(ctx.origin_stop_id)
+            end_disp = ctx.stop_display(ctx.destination_stop_id)
+            # Clean entity_id for new installs
+            self._attr_suggested_object_id = slugify(
+                f"{ctx.route_label}_{start_disp}_{end_disp}_{train_number}"
+            )
+        else:
+            self._attr_name = f"Train {train_number}"
 
     @property
     def device_info(self):
@@ -308,10 +353,6 @@ class MetraTrainSensor(SensorEntity):
             "name": self._device.name,
             "manufacturer": self._device.manufacturer,
         }
-
-    @property
-    def name(self):
-        return self._attr_name
 
     @property
     def state(self) -> str:
@@ -344,6 +385,7 @@ class MetraTrainSensor(SensorEntity):
                 "start_station_name"
             ),
             "arrival_station": (self._coordinator.data or {}).get("end_station_name"),
+            "line_name": (self._coordinator.data or {}).get("line_name"),
         }
 
         trains = (self._coordinator.data or {}).get("trains", [])
@@ -356,9 +398,9 @@ class MetraTrainSensor(SensorEntity):
                     "departure_full": train.get("start_full"),
                     "arrival_full": train.get("end_full"),
                     "trip_id": train.get("trip_id"),
-                    # requested
+                    # field for understanding if there are realtime updates or not
                     "is_live": train.get("is_live", False),
-                    # schedule fallback info + delay
+                    # schedule baseline + delay
                     "scheduled_departure_time": train.get("scheduled_start_time"),
                     "scheduled_arrival_time": train.get("scheduled_end_time"),
                     "scheduled_departure_full": train.get("scheduled_start_full"),
