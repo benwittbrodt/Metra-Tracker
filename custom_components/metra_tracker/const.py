@@ -1,23 +1,25 @@
 """Constants for Metra Tracker integration."""
 
 DOMAIN = "metra_tracker"
-DEFAULT_NAME = "Metra UP-W Arrivals"
 DEFAULT_SCAN_INTERVAL = 30  # 30 seconds
 CONF_API_TOKEN = "api_token"
 
 CONF_LINE = "line"
-CONF_START_STATION = "start_station"
-CONF_END_STATION = "end_station"
+CONF_ORIGIN_STATION = "start_station"
+CONF_DEST_STATION = "end_station"
 
 METRA_LINES = {
+    "BNSF": "Burlington Northern",
+    "HC": "Heritage Corridor",
+    "MD-N": "Milwaukee North",
+    "MD-W": "Milwaukee West",
     "ME": "Metra Electric",
+    "NCS": "North Central Service",
+    "RI": "Rock Island",
+    "SWS": "Southwest Service",
     "UP-N": "Union Pacific North",
     "UP-NW": "Union Pacific Northwest",
     "UP-W": "Union Pacific West",
-    "BNSF": "BNSF Railway",
-    "MD-N": "Milwaukee District North",
-    "MD-W": "Milwaukee District West",
-    "RI": "Rock Island District",
 }
 
 METRA_STOPS_BY_LINE = {
