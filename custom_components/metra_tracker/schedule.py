@@ -15,8 +15,6 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-# from homeassistant.util.dt import as_local
-
 import aiohttp
 
 from .utils import async_get_schedule_zip_path, _LOGGER, _read_gtfs_table_sync

@@ -42,7 +42,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up Metra Tracker sensors from a config entry."""
     coordinator = MetraArrivalsCoordinator(hass, entry)
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    # Store per-entry data under hass.data[DOMAIN][entry_id]
+    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
+        "coordinator"
+    ] = coordinator
     await coordinator.async_config_entry_first_refresh()
 
     device_registry = async_get(hass)
@@ -61,10 +64,9 @@ async def async_setup_entry(
     ]
     async_add_entities(trainsensors, update_before_add=True)
 
-    hass.data[DOMAIN][entry.entry_id] = {
-        "device": device,
-        "sensors": trainsensors,
-    }
+    hass.data[DOMAIN][entry.entry_id].update(
+        {"device": device, "sensors": trainsensors}
+    )
 
 
 class MetraArrivalsCoordinator(DataUpdateCoordinator):
@@ -87,7 +89,6 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
         self._destination_stop_id = (entry.data.get(CONF_DEST_STATION) or "").strip()
 
         self._tz = get_time_zone("America/Chicago")
-        self._schedule_status = None
         self._ctx = None  # RouteContext, built lazily
 
     @property
@@ -108,7 +109,14 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                 raise RuntimeError(f"Realtime request failed HTTP {response.status}")
 
             raw_bytes = await response.read()
-            feed = gtfs_realtime_pb2.FeedMessage()
+
+            feed_cls = getattr(gtfs_realtime_pb2, "FeedMessage", None)
+            if feed_cls is None:
+                raise RuntimeError(
+                    "gtfs_realtime_pb2.FeedMessage not found. "
+                    "Install/upgrade gtfs-realtime-bindings."
+                )
+            feed = feed_cls()  # type: ignore[operator]
             feed.ParseFromString(raw_bytes)
 
         ctx = self._ctx
@@ -179,13 +187,10 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
         try:
             session = async_get_clientsession(self.hass)
 
-            # Ensure schedule.zip exists (and capture status for debugging)
+            # Ensure schedule.zip exists
             try:
-                self._schedule_status = await async_ensure_schedule_zip(
-                    self.hass, session
-                )
+                await async_ensure_schedule_zip(self.hass, session)
             except Exception:  # noqa: BLE001
-                self._schedule_status = None
                 _LOGGER.debug("Could not ensure schedule.zip cache.", exc_info=True)
 
             # Build RouteContext once (uses cached schedule.zip)
