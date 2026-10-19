@@ -55,6 +55,11 @@ class _StaticIndex:
     # stop_info = {seq:int, arrival_time:str, departure_time:str}
     stop_times_by_stop: dict[str, dict[str, dict[str, Any]]]
 
+    # feed_info.txt metadata (empty for feeds that predate feed_info.txt)
+    feed_version: str = ""
+    feed_start_date: str = ""
+    feed_end_date: str = ""
+
 
 _STATIC: _StaticIndex | None = None
 
@@ -83,6 +88,13 @@ def _load_index(zip_path: Path) -> _StaticIndex:
     stop_times = [
         _strip_row(r) for r in _read_gtfs_table_sync(zip_path, "stop_times.txt")
     ]
+
+    # feed_info.txt is new with the 2026 feed revision; guard for older zips
+    try:
+        feed_info_rows = _read_gtfs_table_sync(zip_path, "feed_info.txt")
+    except KeyError:
+        feed_info_rows = []
+    feed_info = feed_info_rows[0] if feed_info_rows else {}
 
     routes_short_to_id: dict[str, str] = {}
     for r in routes:
@@ -140,6 +152,9 @@ def _load_index(zip_path: Path) -> _StaticIndex:
         calendar=calendar,
         calendar_dates=calendar_dates,
         stop_times_by_stop=stop_times_by_stop,
+        feed_version=(feed_info.get("feed_version") or "").strip(),
+        feed_start_date=(feed_info.get("feed_start_date") or "").strip(),
+        feed_end_date=(feed_info.get("feed_end_date") or "").strip(),
     )
 
 
@@ -193,6 +208,12 @@ async def async_get_static_index(
 
     _LOGGER.debug("Loading Metra static schedule index from %s", zip_path)
     _STATIC = await hass.async_add_executor_job(_load_index, zip_path)
+    _LOGGER.info(
+        "Metra static feed version: %s (%s–%s)",
+        _STATIC.feed_version or "unknown",
+        _STATIC.feed_start_date or "?",
+        _STATIC.feed_end_date or "?",
+    )
     return _STATIC
 
 

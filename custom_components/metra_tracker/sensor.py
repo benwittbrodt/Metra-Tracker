@@ -32,7 +32,7 @@ from .utils import (
     _LOGGER,
 )
 
-from .schedule import async_get_next_scheduled_trips
+from .schedule import async_get_next_scheduled_trips, async_get_static_index
 
 
 async def async_setup_entry(
@@ -222,6 +222,21 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
             # 2) Realtime overlay
             realtime_by_trip = await self._fetch_realtime_by_trip(session)
 
+            # Cached static index (no re-parse); used for feed metadata
+            static = await async_get_static_index(self.hass, session)
+
+            # Realtime for our route exists but none of it matches static trips:
+            # likely a static/realtime feed-format mismatch (stale schedule.zip)
+            if realtime_by_trip and not any(
+                tid in static.trip_route for tid in realtime_by_trip
+            ):
+                _LOGGER.warning(
+                    "Realtime trip_ids for route %s match no static trips "
+                    "(static feed version: %s). schedule.zip may be stale.",
+                    ctx.route_id,
+                    static.feed_version or "unknown",
+                )
+
             trains: list[dict[str, Any]] = []
 
             for s in scheduled:
@@ -312,6 +327,9 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                 "line_name": ctx.route_label,
                 "start_station_name": ctx.stop_display(ctx.origin_stop_id),
                 "end_station_name": ctx.stop_display(ctx.destination_stop_id),
+                "feed_version": static.feed_version,
+                "feed_start_date": static.feed_start_date,
+                "feed_end_date": static.feed_end_date,
             }
 
         except Exception as ex:  # noqa: BLE001
@@ -391,6 +409,7 @@ class MetraTrainSensor(SensorEntity):
             ),
             "arrival_station": (self._coordinator.data or {}).get("end_station_name"),
             "line_name": (self._coordinator.data or {}).get("line_name"),
+            "feed_version": (self._coordinator.data or {}).get("feed_version"),
         }
 
         trains = (self._coordinator.data or {}).get("trains", [])
