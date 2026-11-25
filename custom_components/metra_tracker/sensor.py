@@ -149,11 +149,13 @@ class MetraArrivalsCoordinator(DataUpdateCoordinator):
                     ts = 0
                     if stu.HasField("departure") and getattr(stu.departure, "time", 0):
                         ts = int(stu.departure.time)
-                        if getattr(stu.departure, "delay", None) is not None:
+                        # Unset proto2 fields read as 0, not None; only trust
+                        # delay when the feed actually sent it.
+                        if stu.departure.HasField("delay"):
                             live_delay_min = int(stu.departure.delay) // 60
                     elif stu.HasField("arrival") and getattr(stu.arrival, "time", 0):
                         ts = int(stu.arrival.time)
-                        if getattr(stu.arrival, "delay", None) is not None:
+                        if stu.arrival.HasField("delay"):
                             live_delay_min = int(stu.arrival.delay) // 60
 
                     if ts:
